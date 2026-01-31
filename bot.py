@@ -1,53 +1,53 @@
-import os
-
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
 
-load_dotenv()
-
-discord_token = os.getenv("DISCORD_TOKEN")
-
-if not discord_token:
-    raise RuntimeError("DISCORD_TOKEN non définie dans le .env")
-
-print("Lancement du bot...")
-
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="/", intents=intents)
+from config import Config
+from database.database import Database
 
 
-@bot.event
-async def on_ready():
-    print("Bot allumé !")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Commandes slash synchronisées : {len(synced)}")
-    except Exception as e:
-        print(e)
+class HorizonBot:
+    def __init__(self):
+        print("🚀 Initialisation du bot HRZN...")
 
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.members = True
+        intents.guilds = True
 
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-    if message.content.lower() == "bonjour":
-        # channel = message.channel
-        # await channel.send("Comment tu vas ?")
-        author = message.author
-        await author.send("Comment tu vas ?")
+        self.bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+        # Attacher la base de données au bot
+        self.bot.db = Database()
+        self.db = self.bot.db
 
-@bot.tree.command(name="warnguy", description="Alerter une personne")
-async def warnguy(interaction: discord.Interaction, member: discord.Member):
-    await interaction.response.send_message("Alerte envoyé !")
-    await member.send("Tu as reçu une alerte")
+        self.setup_events()
 
+    def setup_events(self):
+        @self.bot.event
+        async def on_ready():
+            print(f"✅ Bot connecté en tant que {self.bot.user}")
+            print(f"📊 Connecté à {len(self.bot.guilds)} serveur(s)")
 
-@bot.tree.command(name="banguy", description="Bannir une personne")
-async def banguy(interaction: discord.Interaction, member: discord.Member):
-    await interaction.response.send_message("Ban envoyé !")
-    await member.send("Tu as été banni")
+            # Charger les cogs AVANT de synchroniser
+            await self.load_cogs()
 
+            try:
+                synced = await self.bot.tree.sync()
+                print(f"⚡ {len(synced)} commandes slash synchronisées")
+            except Exception as e:
+                print(f"❌ Erreur de synchronisation: {e}")
 
-bot.run(discord_token)
+    async def load_cogs(self):
+        """Charge uniquement le module Activity"""
+        try:
+            await self.bot.load_extension("cogs.activity")
+            print("📦 Module chargé: cogs.activity")
+        except Exception as e:
+            print(f"❌ Erreur chargement cogs.activity: {e}")
+
+    async def start(self):
+        try:
+            await self.bot.start(Config.DISCORD_TOKEN)
+        except KeyboardInterrupt:
+            print("\n⏸️  Arrêt du bot...")
+            await self.bot.close()
