@@ -46,7 +46,7 @@ class WeaponConfigModal(discord.ui.Modal):
         # Champs de la modal
         self.tank_field = discord.ui.TextInput(
             label="🛡️ Tank",
-            placeholder="Greataxe:2, Mace:1",
+            placeholder="Greataxe:2, Mace",
             default=format_role("Tank"),
             max_length=200,
             required=True,
@@ -54,7 +54,7 @@ class WeaponConfigModal(discord.ui.Modal):
 
         self.healer_field = discord.ui.TextInput(
             label="💚 Healer",
-            placeholder="Holy Staff:2, Nature Staff:1",
+            placeholder="Holy Staff:2, Nature Staff",
             default=format_role("Healer"),
             max_length=200,
             required=True,
@@ -62,7 +62,7 @@ class WeaponConfigModal(discord.ui.Modal):
 
         self.dps_field = discord.ui.TextInput(
             label="⚔️ DPS",
-            placeholder="Bow:3, Crossbow:2, Fire Staff:1",
+            placeholder="Bow:3, Crossbow:2, Fire Staff",
             default=format_role("DPS"),
             max_length=200,
             required=True,
@@ -84,6 +84,11 @@ class WeaponConfigModal(discord.ui.Modal):
                     count = int(count.strip())
                     if count > 0:
                         result[name] = count
+                else:
+                    # Si pas de ":", on attribue automatiquement 1 slot
+                    name = weapon.strip()
+                    if name:  # Vérifier que le nom n'est pas vide
+                        result[name] = 1
         except:
             raise ValueError("Format invalide")
         return result
@@ -114,8 +119,8 @@ class WeaponConfigModal(discord.ui.Modal):
 
         except ValueError as e:
             await interaction.response.send_message(
-                f"❌ Erreur de format. Utilisez le format : `NomArme:Nombre`\n"
-                f"Exemple : `Greataxe:2, Mace:1`\n\n"
+                f"❌ Erreur de format. Utilisez le format : `NomArme:Nombre` ou `NomArme` (défaut: 1)\n"
+                f"Exemples : `Greataxe:2, Mace` ou `Bow:3, Crossbow:2, Fire Staff`\n\n"
                 f"Détails : {str(e)}",
                 ephemeral=True,
             )
@@ -169,7 +174,8 @@ class WeaponConfigModal(discord.ui.Modal):
                 event_date=self.event_datetime,
                 ping_role_id=str(self.ping_role.id),
                 roles_config=roles_config,
-                reminders=Config.DEFAULT_REMINDER_MINUTES,
+                reminders=[30],  # Un seul rappel à 30 minutes
+                last_reminder_sent=None,  # Nouveau champ pour tracker le dernier rappel
             )
             session.add(activity)
             session.commit()
@@ -179,10 +185,16 @@ class WeaponConfigModal(discord.ui.Modal):
                 sum(weapons.values()) for weapons in roles_config.values()
             )
 
+            # Formater le rôle pour le message de confirmation
+            if self.ping_role.name in ["@everyone", "@here"]:
+                role_display = self.ping_role.name
+            else:
+                role_display = self.ping_role.mention
+
             await interaction.followup.send(
                 f"✅ Activité **{self.activity_title}** créée avec succès !\n"
                 f"👑 Leader : {self.leader.mention}\n"
-                f"📢 Rôle à ping : {self.ping_role.mention}\n"
+                f"📢 Rôle à ping : {role_display}\n"
                 f"🎯 Slots disponibles : **{total_slots}**\n"
                 f"💬 Thread d'inscription : {thread.mention}\n\n"
                 f"*Les joueurs peuvent s'inscrire avec `/party join <slot>` dans le thread.*",
@@ -412,6 +424,8 @@ class ActivityCog(commands.Cog):
                         return
 
                     activity.event_date = event_datetime
+                    # Réinitialiser le tracker de rappel si la date change
+                    activity.last_reminder_sent = None
                     changes.append(f"Date/Heure : **{new_date} à {new_time}**")
 
                 except ValueError:
@@ -430,8 +444,8 @@ class ActivityCog(commands.Cog):
 
             session.commit()
 
-            # Mettre à jour l'embed
-            await self.update_activity_embed(activity, session)
+            # CORRECTION: Mettre à jour l'embed avec les nouvelles informations
+            await self.update_activity_embed_full(activity, session)
 
             await interaction.followup.send(
                 "✅ Activité mise à jour :\n" + "\n".join(f"• {c}" for c in changes),
@@ -700,6 +714,105 @@ class ActivityCog(commands.Cog):
         finally:
             session.close()
 
+    @party.command(name="add", description="Ajouter un joueur à un slot (admin/leader)")
+    @app_commands.describe(user="Joueur à ajouter", slot="Numéro du slot")
+    async def party_add(
+        self, interaction: discord.Interaction, user: discord.Member, slot: int
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        if not isinstance(interaction.channel, discord.Thread):
+            await interaction.followup.send(
+                "❌ Cette commande doit être utilisée dans le thread d'une activité.",
+                ephemeral=True,
+            )
+            return
+
+        session = self.db.get_session()
+        try:
+            activity = (
+                session.query(Activity)
+                .filter_by(thread_id=str(interaction.channel.id))
+                .first()
+            )
+
+            if not activity:
+                await interaction.followup.send(
+                    "❌ Aucune activité trouvée pour ce thread.",
+                    ephemeral=True,
+                )
+                return
+
+            # Vérifier que l'utilisateur n'est pas déjà inscrit
+            existing_registration = (
+                session.query(Registration)
+                .filter_by(activity_id=activity.id, user_id=str(user.id))
+                .first()
+            )
+
+            if existing_registration:
+                await interaction.followup.send(
+                    f"❌ {user.mention} est déjà inscrit sur le slot {existing_registration.slot_number}.",
+                    ephemeral=True,
+                )
+                return
+
+            # Trouver le rôle et l'arme correspondants au slot
+            current_slot = 1
+            target_role = None
+            target_weapon = None
+
+            for role_name, weapons in activity.roles_config.items():
+                for weapon, count in weapons.items():
+                    if current_slot <= slot < current_slot + count:
+                        target_role = role_name
+                        target_weapon = weapon
+                        break
+                    current_slot += count
+                if target_role:
+                    break
+
+            if not target_role:
+                await interaction.followup.send(
+                    f"❌ Le slot {slot} n'existe pas.", ephemeral=True
+                )
+                return
+
+            # Vérifier que le slot n'est pas déjà pris
+            existing_slot = (
+                session.query(Registration)
+                .filter_by(activity_id=activity.id, slot_number=slot)
+                .first()
+            )
+
+            if existing_slot:
+                await interaction.followup.send(
+                    f"❌ Le slot {slot} est déjà pris.", ephemeral=True
+                )
+                return
+
+            # Créer l'inscription
+            registration = Registration(
+                activity_id=activity.id,
+                user_id=str(user.id),
+                role_name=target_role,
+                weapon=target_weapon,
+                slot_number=slot,
+            )
+            session.add(registration)
+            session.commit()
+
+            # Mettre à jour l'embed
+            await self.update_activity_embed(activity, session)
+
+            await interaction.followup.send(
+                f"✅ {user.mention} a été ajouté au slot **{slot}** ({target_role} - {target_weapon}).",
+                ephemeral=True,
+            )
+
+        finally:
+            session.close()
+
     @party.command(
         name="reset", description="Retirer un joueur d'un slot (admin/leader)"
     )
@@ -828,7 +941,7 @@ class ActivityCog(commands.Cog):
         return " ".join(parts) if parts else "Imminent !"
 
     async def update_activity_embed(self, activity, session):
-        """Mettre à jour l'embed avec les inscriptions actuelles"""
+        """Mettre à jour l'embed avec les inscriptions actuelles (slots uniquement)"""
         # Récupérer toutes les inscriptions
         registrations = (
             session.query(Registration).filter_by(activity_id=activity.id).all()
@@ -876,6 +989,70 @@ class ActivityCog(commands.Cog):
 
         await message.edit(embed=embed)
 
+    async def update_activity_embed_full(self, activity, session):
+        """Mettre à jour l'embed complet (titre, date, leader ET slots)"""
+        # Récupérer toutes les inscriptions
+        registrations = (
+            session.query(Registration).filter_by(activity_id=activity.id).all()
+        )
+
+        slots_taken = {reg.slot_number: reg for reg in registrations}
+
+        # Récupérer le message
+        channel = self.bot.get_channel(int(activity.channel_id))
+        if not channel:
+            return
+
+        try:
+            message = await channel.fetch_message(int(activity.message_id))
+        except:
+            return
+
+        # Récréer l'embed complet avec les nouvelles infos
+        embed = discord.Embed(title=activity.title, color=Config.COLOR_PRIMARY)
+
+        # Leader
+        embed.add_field(
+            name="👑 Leader",
+            value=f"<@{activity.leader}>",
+            inline=True,
+        )
+
+        # Date & Heure
+        embed.add_field(
+            name="📅 Date & Heure",
+            value=activity.event_date.strftime("%d/%m/%Y à %H:%M"),
+            inline=True,
+        )
+
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+        # Affichage des slots par rôle
+        slot_counter = 1
+        for role_name, weapons in activity.roles_config.items():
+            field_value = ""
+            for weapon, count in weapons.items():
+                for i in range(count):
+                    if slot_counter in slots_taken:
+                        reg = slots_taken[slot_counter]
+                        user = f"<@{reg.user_id}>"
+                        field_value += f"`{slot_counter}.` {weapon} - {user}\n"
+                    else:
+                        field_value += f"`{slot_counter}.` {weapon} - *Libre*\n"
+                    slot_counter += 1
+
+            role_emoji = {"Tank": "🛡️", "Healer": "💚", "DPS": "⚔️"}.get(role_name, "🔹")
+
+            embed.add_field(
+                name=f"{role_emoji} {role_name}", value=field_value, inline=False
+            )
+
+        embed.set_footer(
+            text="💡 Utilisez /party join <slot> pour vous inscrire | /party leave pour partir"
+        )
+
+        await message.edit(embed=embed)
+
     @tasks.loop(minutes=1)
     async def check_reminders(self):
         """Vérifier les rappels d'activités"""
@@ -891,10 +1068,12 @@ class ActivityCog(commands.Cog):
             for activity in activities:
                 time_until = (activity.event_date - now).total_seconds() / 60
 
-                # Envoyer les rappels
-                for reminder_min in activity.reminders:
-                    if abs(time_until - reminder_min) < 1:
-                        await self.send_reminder(activity, reminder_min)
+                # CORRECTION: Vérifier si on n'a pas déjà envoyé le rappel pour cette activité
+                # Envoyer le rappel à 30 minutes si pas encore envoyé
+                if 29 <= time_until <= 31 and activity.last_reminder_sent != 30:
+                    await self.send_reminder(activity, 30, session)
+                    activity.last_reminder_sent = 30
+                    session.commit()
 
                 # Démarrer l'activité si c'est l'heure
                 if time_until <= 0:
@@ -902,29 +1081,26 @@ class ActivityCog(commands.Cog):
         finally:
             session.close()
 
-    async def send_reminder(self, activity, minutes):
-        """Envoyer un rappel dans le thread"""
+    async def send_reminder(self, activity, minutes, session):
+        """Envoyer un rappel dans le thread (uniquement aux inscrits)"""
         thread = self.bot.get_channel(int(activity.thread_id))
         if not thread:
             return
 
-        # Récupérer le rôle via l'ID
-        role = (
-            thread.guild.get_role(int(activity.ping_role_id))
-            if activity.ping_role_id
-            else None
+        # Récupérer tous les inscrits
+        registrations = (
+            session.query(Registration).filter_by(activity_id=activity.id).all()
         )
 
-        if role:
-            if role.name == "@everyone" or role.name == "@here":
-                mention = f"{role.name}"
-            else:
-                mention = role.mention
-        else:
-            mention = ""
+        if not registrations:
+            # Pas d'inscrits, ne pas envoyer de rappel
+            return
+
+        # Créer la liste des mentions
+        mentions = " ".join([f"<@{reg.user_id}>" for reg in registrations])
 
         await thread.send(
-            f"⏰ {mention} **Rappel !** L'activité **{activity.title}** commence dans **{minutes} minutes** !"
+            f"⏰ {mentions} **Rappel !** L'activité **{activity.title}** commence dans **{minutes} minutes** !"
         )
 
     async def start_activity(self, activity, session):
@@ -933,24 +1109,15 @@ class ActivityCog(commands.Cog):
         if not thread:
             return
 
-        role = (
-            thread.guild.get_role(int(activity.ping_role_id))
-            if activity.ping_role_id
-            else None
-        )
-        if role:
-            mention = (
-                role.mention if role.name not in ["@everyone", "@here"] else role.name
-            )
-        else:
-            mention = ""
-
         registrations = (
             session.query(Registration).filter_by(activity_id=activity.id).all()
         )
 
+        # Créer la liste des mentions
+        mentions = " ".join([f"<@{reg.user_id}>" for reg in registrations])
+
         await thread.send(
-            f"🚨 {mention} **MASS UP !**\n\n"
+            f"🚨 {mentions} **MASS UP !**\n\n"
             f"L'activité **{activity.title}** commence maintenant !\n"
             f"👥 **{len(registrations)} joueurs inscrits**\n"
             f"👑 Leader : <@{activity.leader}>"

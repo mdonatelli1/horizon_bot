@@ -15,8 +15,8 @@ class Config:
     COLOR_ERROR = 0xED4245
     COLOR_WARNING = 0xFEE75C
 
-    # Délais par défaut
-    DEFAULT_REMINDER_MINUTES = [30, 10, 5]
+    # Délais par défaut - un seul rappel à 30 minutes
+    DEFAULT_REMINDER_MINUTES = [30]
 
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN non définie dans le .env")

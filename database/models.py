@@ -27,6 +27,9 @@ class Activity(Base):
         JSON, nullable=False
     )  # Structure: {role_name: {weapon: slots}}
     reminders = Column(JSON, nullable=False)  # Liste des minutes avant event
+    last_reminder_sent = Column(
+        Integer, nullable=True
+    )  # Dernier rappel envoyé (en minutes)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
